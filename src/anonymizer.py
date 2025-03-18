@@ -5,122 +5,60 @@ import concurrent.futures
 from pathlib import Path
 import edsnlp
 import huggingface_hub
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import os
 from dotenv import load_dotenv
 
 # Charger les variables d'environnement
 load_dotenv()
 
-class Pseudonymizer:
-    """Classe pour pseudonymiser les textes extraits des PDF médicaux en utilisant eds-pseudo."""
+class MedicalDataAnonymizer:
+    """Classe pour anonymiser les données médicales extraites en utilisant eds-pseudo."""
     
     def __init__(self, model: str = "AP-HP/eds-pseudo-public"):
-        """Initialise le pipeline NLP avec eds-pseudo."""
+        """Initialise le pipeline NLP avec eds-pseudo.
+        
+        Args:
+            model: Nom du modèle à utiliser (par défaut: "AP-HP/eds-pseudo-public")
+        """
         # Récupérer le token depuis les variables d'environnement
         token = os.getenv("HUGGINGFACE_TOKEN")
         if not token:
             raise ValueError("Le token Hugging Face n'est pas configuré. Créez un fichier .env avec HUGGINGFACE_TOKEN=votre_token")
         
+        # Se connecter à Hugging Face et charger le modèle
         huggingface_hub.login(token=token)
         self.nlp = edsnlp.load(model, auto_update=True)
         
-    def pseudonymize_text(self, text: str) -> tuple[str, list]:
-        """Applique la pseudonymisation sur un texte médical et retourne le texte modifié avec un tableau des entités remplacées."""
-        doc = self.nlp(text)
-        anonymized_text = text
-        pseudonymization_table = []
-        
-        for ent in doc.ents:
-            replacement = f"[ANONYMIZED_{ent.label_}]"
-            pseudonymization_table.append({"original": ent.text, "replacement": replacement, "label": ent.label_})
-            anonymized_text = anonymized_text.replace(ent.text, replacement)
-        
-        return anonymized_text, pseudonymization_table
-    
-    def process_single_file(self, file: Path, input_dir: Path, output_dir: Path):
-        """Traite un seul fichier pour la pseudonymisation et enregistre les résultats."""
-        with open(file, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        
-        text_file = input_dir / f"{metadata['file_id']}.txt"
-        if not text_file.exists():
-            logging.warning(f"Fichier texte manquant pour {file}")
-            return
-        
-        with open(text_file, "r", encoding="utf-8") as f:
-            text = f.read()
-        
-        pseudonymized_text, pseudonymization_table = self.pseudonymize_text(text)
-        
-        output_file = output_dir / f"{metadata['file_id']}_pseudonymized.txt"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(pseudonymized_text)
-        
-        table_file_json = output_dir / f"{metadata['file_id']}_pseudonymization_table.json"
-        with open(table_file_json, "w", encoding="utf-8") as f:
-            json.dump(pseudonymization_table, f, indent=2, ensure_ascii=False)
-        
-        table_file_csv = output_dir / f"{metadata['file_id']}_pseudonymization_table.csv"
-        with open(table_file_csv, "w", encoding="utf-8", newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Original", "Replacement", "Label"])
-            for row in pseudonymization_table:
-                writer.writerow([row["original"], row["replacement"], row["label"]])
-        
-    def process_extracted_files(self, input_dir: Path, output_dir: Path):
-        """Traite tous les fichiers extraits en parallèle pour appliquer la pseudonymisation."""
-        input_dir = Path(input_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        files = list(input_dir.glob("*_meta.json"))
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self.process_single_file, file, input_dir, output_dir) for file in files]
-            concurrent.futures.wait(futures)
-        
-        logging.info("Pseudonymisation terminée pour tous les fichiers.")
-    
-    def get_pseudonymized_text(self, text: str) -> str:
-        """Retourne le texte pseudonymisé sans traitement de fichier."""
-        pseudonymized_text, _ = self.pseudonymize_text(text)
-        return pseudonymized_text
+        # Liste des entités détectées par eds-pseudo
+        self.entity_types = [
+            "ADRESSE",    # Adresse postale
+            "DATE",       # Date quelconque
+            "DATE_NAISSANCE",  # Date de naissance
+            "HOPITAL",    # Nom d'hôpital
+            "IPP",        # Identifiant patient
+            "MAIL",       # Adresse email
+            "NDA",        # Numéro de dossier
+            "NOM",        # Nom de famille
+            "PRENOM",     # Prénom
+            "SECU",       # Numéro de sécurité sociale
+            "TEL",        # Numéro de téléphone
+            "VILLE",      # Nom de ville
+            "ZIP"         # Code postal
+        ]
 
-class MedicalDataAnonymizer:
-    """Classe pour anonymiser les données médicales extraites."""
-
-    def __init__(self):
-        """Initialise le pipeline d'anonymisation avec eds-nlp."""
-        # Créer le pipeline eds-nlp avec les composants nécessaires
-        self.nlp = edsnlp.blank("eds")
+    def anonymize_text(self, text: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Anonymise un texte donné et retourne le texte modifié avec les entités détectées.
         
-        # Ajouter les composants pour la détection des entités
-        self.nlp.add_pipe("normalizer")
-        self.nlp.add_pipe("sentences")
-        
-        # Composants pour l'anonymisation des données personnelles
-        self.nlp.add_pipe("names", config={"mode": "strict"})
-        self.nlp.add_pipe("dates", config={"mode": "strict"})
-        self.nlp.add_pipe("person_mentions", config={"mode": "strict"})
-        
-        # Composants pour l'anonymisation des données médicales
-        self.nlp.add_pipe("hospital_names", config={"mode": "strict"})
-        self.nlp.add_pipe("medican_mentions")  # Pour les mentions médicales
-        self.nlp.add_pipe("measurements")  # Pour les mesures et valeurs
-        
-        # Composants pour les données sensibles supplémentaires
-        self.nlp.add_pipe("addresses")  # Pour les adresses
-        self.nlp.add_pipe("ids")  # Pour les identifiants
-
-    def _anonymize_text(self, text: str) -> tuple[str, List[Dict[str, Any]]]:
-        """
-        Anonymise un texte donné en utilisant eds-nlp.
-
         Args:
             text: Texte à anonymiser
-
+            
         Returns:
-            tuple: (texte anonymisé, liste des entités détectées)
+            Tuple contenant :
+            - Le texte anonymisé
+            - La liste des entités détectées avec leurs métadonnées
         """
+        # Traiter le texte avec le pipeline
         doc = self.nlp(text)
         anonymized_text = text
         entities = []
@@ -131,35 +69,33 @@ class MedicalDataAnonymizer:
             entity_text = ent.text
             start, end = ent.start_char, ent.end_char
             
-            # Créer un identifiant de remplacement plus descriptif
+            # Créer un identifiant de remplacement descriptif
             replacement = f"[{entity_type}_{len(entities):03d}]"
             
             # Remplacer l'entité dans le texte
             anonymized_text = anonymized_text[:start] + replacement + anonymized_text[end:]
             
-            # Sauvegarder l'information sur l'entité avec plus de détails
+            # Sauvegarder les informations sur l'entité
             entities.append({
                 "type": entity_type,
                 "text": entity_text,
                 "start": start,
                 "end": end,
                 "replacement": replacement,
-                "confidence": getattr(ent, "confidence", None),
-                "pattern": getattr(ent, "pattern", None)
+                "confidence": getattr(ent, "score", None)  # Score de confiance si disponible
             })
 
         return anonymized_text, entities
 
     def anonymize_extracted_file(self, input_file: Path, output_dir: Optional[Path] = None) -> Dict[str, Any]:
-        """
-        Anonymise un fichier JSON extrait.
-
+        """Anonymise un fichier JSON extrait.
+        
         Args:
             input_file: Chemin vers le fichier JSON extrait
             output_dir: Répertoire de sortie pour les fichiers anonymisés
-
+            
         Returns:
-            Dict[str, Any]: Données anonymisées
+            Dict[str, Any]: Données anonymisées avec métadonnées
         """
         # Charger les données extraites
         with open(input_file, 'r', encoding='utf-8') as f:
@@ -167,21 +103,28 @@ class MedicalDataAnonymizer:
 
         # Anonymiser chaque page
         for page in extracted_data['pages']:
-            # Anonymiser le texte nettoyé
-            anonymized_text, entities = self._anonymize_text(page['cleaned_text'])
+            # Anonymiser le texte principal
+            anonymized_text, entities = self.anonymize_text(page['cleaned_text'])
             page['anonymized_text'] = anonymized_text
             page['detected_entities'] = entities
 
-            # Anonymiser les sections
-            for section_name, section_text in page['sections'].items():
-                anonymized_section, section_entities = self._anonymize_text(section_text)
-                page['sections'][section_name] = anonymized_section
-                page['detected_entities'].extend(section_entities)
+            # Anonymiser les sections si présentes
+            if 'sections' in page:
+                for section_name, section_text in page['sections'].items():
+                    anonymized_section, section_entities = self.anonymize_text(section_text)
+                    page['sections'][section_name] = anonymized_section
+                    page['detected_entities'].extend(section_entities)
 
         # Mettre à jour les métadonnées
+        if 'metadata' not in extracted_data:
+            extracted_data['metadata'] = {}
+        if 'processing_history' not in extracted_data['metadata']:
+            extracted_data['metadata']['processing_history'] = []
+            
         extracted_data['metadata']['processing_history'].append({
             "step": "anonymization",
-            "details": "Anonymisation avec eds-nlp",
+            "tool": "eds-pseudo",
+            "model": self.nlp.meta.get("name", "AP-HP/eds-pseudo-public"),
             "entity_count": sum(len(page['detected_entities']) for page in extracted_data['pages'])
         })
 
@@ -190,32 +133,62 @@ class MedicalDataAnonymizer:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             
+            # Sauvegarder le fichier JSON principal
             output_file = output_dir / f"{input_file.stem}_anonymized.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(extracted_data, f, ensure_ascii=False, indent=2)
+            
+            # Sauvegarder un tableau de correspondance au format CSV
+            table_file = output_dir / f"{input_file.stem}_entities.csv"
+            with open(table_file, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Type", "Texte Original", "Remplacement", "Confiance"])
+                for page in extracted_data['pages']:
+                    for entity in page['detected_entities']:
+                        writer.writerow([
+                            entity['type'],
+                            entity['text'],
+                            entity['replacement'],
+                            entity.get('confidence', '')
+                        ])
 
         return extracted_data
 
     def process_directory(self, input_dir: Path, output_dir: Path) -> Dict[str, Dict[str, Any]]:
-        """
-        Traite tous les fichiers JSON extraits dans un répertoire.
-
+        """Traite tous les fichiers JSON extraits dans un répertoire.
+        
         Args:
             input_dir: Répertoire contenant les fichiers JSON extraits
             output_dir: Répertoire de sortie pour les fichiers anonymisés
-
+            
         Returns:
-            Dict[str, Dict[str, Any]]: Résultats de l'anonymisation
+            Dict[str, Dict[str, Any]]: Résultats de l'anonymisation par fichier
         """
         results = {}
+        input_dir = Path(input_dir)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
         
         # Traiter tous les fichiers JSON
-        for json_file in input_dir.glob("*_extracted.json"):
-            try:
-                result = self.anonymize_extracted_file(json_file, output_dir)
-                results[json_file.stem] = result
-            except Exception as e:
-                print(f"Erreur lors du traitement de {json_file}: {str(e)}")
-                continue
-
+        files = list(input_dir.glob("*_extracted.json"))
+        total_files = len(files)
+        
+        logging.info(f"Début de l'anonymisation de {total_files} fichiers...")
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_file = {
+                executor.submit(self.anonymize_extracted_file, file, output_dir): file
+                for file in files
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                file = future_to_file[future]
+                try:
+                    result = future.result()
+                    results[file.stem] = result
+                    logging.info(f"Fichier traité avec succès : {file.name}")
+                except Exception as e:
+                    logging.error(f"Erreur lors du traitement de {file}: {str(e)}")
+        
+        logging.info(f"Anonymisation terminée. {len(results)}/{total_files} fichiers traités avec succès.")
         return results
